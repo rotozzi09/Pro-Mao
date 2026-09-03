@@ -43,17 +43,26 @@ Criar uma ferramenta para prestadores de serviços gerais e clientes, com cadast
 - Endpoint agregador GET /api/providers/{id}/reviews (média e total).
 - Correções: validação de ObjectId (400 em vez de 500), authz em GET /requests/{id}/offers, remoção de projeções que estavam ocultando dados de catálogo/portfólio, toast auto-dismiss, link "Entrar" visível no mobile.
 
+## What's been implemented (2026-09-03, phase 4)
+- Perfil público aberto para prestadores em `/prestador/:id`, com catálogo, preços, portfólio autorizado, avaliações, indicações da comunidade e link compartilhável.
+- Endpoints públicos e sociais: `GET /api/providers/public/{id}`, `POST /api/recommendations`, `GET /api/recommendations/mine` e `GET /api/notifications/mine`.
+- Indicações da comunidade: clientes e prestadores podem indicar um prestador para outra pessoa por nome/e-mail; prestadores não podem autoindicar; mensagens passam pela mesma validação de linguagem educada.
+- Notificações por e-mail integradas via Resend com envio real quando `RESEND_API_KEY` e `SENDER_EMAIL` existirem; sem credenciais, o sistema registra a notificação como `skipped` sem quebrar o fluxo.
+- Propostas criadas/aceitas agora também registram notificações; duplicidade de proposta do mesmo prestador no mesmo pedido é bloqueada.
+- UI do prestador mostra cartão de compartilhamento do perfil público e indicações recebidas; cards de prestadores reais abrem o perfil público.
+- Correções adicionais: botão de avaliação passa para estado "Atendimento avaliado", contagem completa de recomendações, toast estabilizado em navegação e auto-dismiss validado.
+
 ## Prioritized backlog
 ### P0
-- Associar propostas a estados de atendimento e aceite do cliente.
-- Evoluir armazenamento de fotos para object storage dedicado em produção.
+- Ativar credenciais reais de e-mail (`RESEND_API_KEY`, `SENDER_EMAIL`) quando o domínio/remetente estiver pronto.
 ### P1
-- Avaliações e depoimentos vinculados a atendimentos concluídos.
-- Indicações entre clientes e prestadores.
+- Evoluir armazenamento de fotos para object storage dedicado em produção.
+- Melhorar descoberta por localização/bairro e distância.
 ### P2
-- Indicações entre usuários, notificações e filtros por localização.
+- Histórico avançado de notificações na interface e preferências de recebimento.
+- Filtros de disponibilidade/agenda dos prestadores.
 
 ## Next tasks
-1. Implementar painel de catálogo do prestador.
-2. Adicionar upload de fotos com autorização do cliente.
-3. Criar propostas e acompanhamento do pedido.
+1. Configurar remetente real de e-mail para envio efetivo das notificações.
+2. Integrar object storage para fotos do portfólio.
+3. Adicionar filtros por localização/disponibilidade para melhorar matching.

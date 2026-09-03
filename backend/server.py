@@ -8,7 +8,8 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import os, bcrypt, jwt
+from html import escape
+import asyncio, logging, os, bcrypt, jwt, resend
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -23,6 +24,7 @@ db = client[os.environ["DB_NAME"]]
 app = FastAPI()
 api = APIRouter(prefix="/api")
 JWT_ALGORITHM = "HS256"
+logger = logging.getLogger("promao")
 
 class RegisterInput(BaseModel):
     name: str
@@ -45,6 +47,12 @@ class ReviewInput(BaseModel):
     rating: int
     testimonial: str
 
+class RecommendationInput(BaseModel):
+    provider_id: str
+    recipient_name: str
+    recipient_email: EmailStr
+    message: Optional[str] = None
+
 class CatalogInput(BaseModel):
     name: str
     category: str
@@ -64,6 +72,13 @@ class PortfolioInput(BaseModel):
 
 def public_user(user):
     return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": user["role"], "google_linked": user.get("google_linked", False)}
+
+def initials(name: str):
+    return "".join(x[0] for x in name.split()[:2]).upper() or "PM"
+
+def public_profile_url(provider_id: str):
+    base_url = os.environ.get("FRONTEND_URL")
+    return f"{base_url.rstrip('/')}/prestador/{provider_id}" if base_url else ""
 
 def token(user):
     secret = os.environ["JWT_SECRET"]
@@ -87,6 +102,26 @@ async def current_user(request: Request):
         return user
     except Exception:
         raise HTTPException(401, "Sessão expirada")
+
+async def record_and_send_email(recipient_email: str, subject: str, html_content: str, event: str, user_id: Optional[str] = None, metadata: Optional[dict] = None):
+    now = datetime.now(timezone.utc).isoformat()
+    record = {"recipient_email": recipient_email, "subject": subject, "event": event, "user_id": user_id, "metadata": metadata or {}, "created_at": now, "status": "queued"}
+    created = await db.email_notifications.insert_one(record)
+    api_key = os.environ.get("RESEND_API_KEY")
+    sender = os.environ.get("SENDER_EMAIL")
+    if not api_key or not sender:
+        await db.email_notifications.update_one({"_id": created.inserted_id}, {"$set": {"status": "skipped", "reason": "missing_email_configuration", "updated_at": now}})
+        return
+    try:
+        resend.api_key = api_key
+        email = await asyncio.to_thread(resend.Emails.send, {"from": sender, "to": [recipient_email], "subject": subject, "html": html_content})
+        await db.email_notifications.update_one({"_id": created.inserted_id}, {"$set": {"status": "sent", "provider_id": email.get("id"), "updated_at": datetime.now(timezone.utc).isoformat()}})
+    except Exception as exc:
+        logger.exception("Falha ao enviar e-mail")
+        await db.email_notifications.update_one({"_id": created.inserted_id}, {"$set": {"status": "failed", "reason": str(exc), "updated_at": datetime.now(timezone.utc).isoformat()}})
+
+def schedule_email(*args, **kwargs):
+    asyncio.create_task(record_and_send_email(*args, **kwargs))
 
 @api.get("/")
 async def root(): return {"message": "ProMão API"}
@@ -159,7 +194,16 @@ async def providers(category: Optional[str] = None, q: Optional[str] = None):
         if category: demo = [p for p in demo if category.lower() in p["category"].lower()]
         if q: demo = [p for p in demo if q.lower() in (p["name"] + p["category"]).lower()]
         return demo
-    return [{"id":str(u["_id"]),"name":u["name"],"category":u.get("category","Serviços gerais"),"rating":5,"reviews":0,"price":"a combinar","initials":"".join(x[0] for x in u["name"].split()[:2])} for u in users]
+    result = []
+    for u in users:
+        provider_id = str(u["_id"])
+        first_catalog = await db.catalog.find_one({"provider_id": provider_id}, {"_id": 0})
+        review_docs = await db.reviews.find({"provider_id": provider_id}, {"_id": 0, "rating": 1}).to_list(100)
+        total = len(review_docs)
+        avg = round(sum(r["rating"] for r in review_docs) / total, 1) if total else 5
+        rec_count = await db.recommendations.count_documents({"provider_id": provider_id})
+        result.append({"id":provider_id,"name":u["name"],"category":first_catalog.get("category") if first_catalog else u.get("category","Serviços gerais"),"rating":avg,"reviews":total,"recommendations":rec_count,"price":f"a partir de R$ {first_catalog['price']:.0f}" if first_catalog else "a combinar","initials":initials(u["name"])})
+    return result
 
 @api.post("/requests")
 async def create_request(data: RequestInput, user=Depends(current_user)):
@@ -170,6 +214,10 @@ async def create_request(data: RequestInput, user=Depends(current_user)):
 async def list_requests(user=Depends(current_user)):
     query = {"client_id":str(user["_id"])} if user["role"] == "client" else {"status":"open"}
     items = await db.requests.find(query).sort("created_at", -1).to_list(50)
+    if user["role"] == "provider":
+        offered = await db.offers.find({"provider_id":str(user["_id"])}, {"_id":0, "request_id":1}).to_list(200)
+        offered_ids = {item.get("request_id") for item in offered}
+        items = [item for item in items if str(item.get("_id")) not in offered_ids]
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
@@ -179,8 +227,14 @@ async def create_offer(request_id: str, data: OfferInput, user=Depends(current_u
     req = await db.requests.find_one({"_id":oid(request_id)})
     if not req: raise HTTPException(404, "Pedido não encontrado")
     if req.get("status") != "open": raise HTTPException(400, "Este pedido não está mais aceitando propostas")
+    existing = await db.offers.find_one({"request_id":request_id,"provider_id":str(user["_id"])}, {"_id": 1})
+    if existing: raise HTTPException(409, "Você já enviou uma proposta para este pedido")
     offer = data.model_dump(); offer.update({"request_id":request_id,"provider_id":str(user["_id"]),"provider_name":user["name"],"status":"pending","client_completed":False,"provider_completed":False,"created_at":datetime.now(timezone.utc).isoformat()})
-    result = await db.offers.insert_one(offer); offer["id"] = str(result.inserted_id); offer.pop("_id", None); return offer
+    result = await db.offers.insert_one(offer); offer["id"] = str(result.inserted_id); offer.pop("_id", None)
+    client_user = await db.users.find_one({"_id":oid(req["client_id"])}, {"_id":0,"email":1,"name":1})
+    if client_user:
+        schedule_email(client_user["email"], "Você recebeu uma proposta na ProMão", f"<p>Olá, {escape(client_user['name'])}.</p><p><strong>{escape(user['name'])}</strong> enviou uma proposta para <strong>{escape(req.get('service','seu pedido'))}</strong>.</p>", "offer_created", req["client_id"], {"offer_id": offer["id"], "request_id": request_id})
+    return offer
 
 @api.get("/requests/{request_id}/offers")
 async def list_offers(request_id: str, user=Depends(current_user)):
@@ -191,7 +245,9 @@ async def list_offers(request_id: str, user=Depends(current_user)):
         items = await db.offers.find({"request_id":request_id}).sort("created_at", 1).to_list(50)
     else:
         items = await db.offers.find({"request_id":request_id,"provider_id":str(user["_id"])}).to_list(50)
-    for item in items: item["id"] = str(item.pop("_id"))
+    for item in items:
+        item["id"] = str(item.pop("_id"))
+        item["reviewed"] = bool(await db.reviews.find_one({"offer_id": item["id"]}, {"_id": 1}))
     return items
 
 @api.get("/offers/mine")
@@ -219,6 +275,9 @@ async def accept_offer(offer_id: str, user=Depends(current_user)):
     await db.offers.update_one({"_id":offer["_id"]},{"$set":{"status":"accepted","accepted_at":datetime.now(timezone.utc).isoformat()}})
     await db.offers.update_many({"request_id":offer["request_id"],"_id":{"$ne":offer["_id"]}},{"$set":{"status":"not_selected"}})
     await db.requests.update_one({"_id":req["_id"]},{"$set":{"status":"in_progress","accepted_offer_id":str(offer["_id"]),"accepted_provider_id":offer["provider_id"]}})
+    provider = await db.users.find_one({"_id":oid(offer["provider_id"])}, {"_id":0,"email":1,"name":1})
+    if provider:
+        schedule_email(provider["email"], "Sua proposta foi aceita na ProMão", f"<p>Olá, {escape(provider['name'])}.</p><p>Sua proposta para <strong>{escape(req.get('service','um serviço'))}</strong> foi aceita. Combine os próximos passos com o cliente pela plataforma.</p>", "offer_accepted", offer["provider_id"], {"offer_id": str(offer["_id"]), "request_id": offer["request_id"]})
     return {"ok":True}
 
 @api.post("/offers/{offer_id}/complete")
@@ -292,6 +351,58 @@ def polite_check(text: str):
     for term in RUDE_TERMS:
         if term in lower: return False
     return True
+
+@api.get("/providers/public/{provider_id}")
+async def public_provider_profile(provider_id: str):
+    provider = await db.users.find_one({"_id":oid(provider_id),"role":"provider"}, {"password_hash":0})
+    if not provider: raise HTTPException(404, "Prestador não encontrado")
+    catalog = await db.catalog.find({"provider_id":provider_id}, {"_id":0}).sort("created_at", -1).to_list(100)
+    portfolio = await db.portfolio.find({"provider_id":provider_id,"client_authorized":True}, {"_id":0,"client_email":0}).sort("created_at", -1).to_list(24)
+    reviews = await db.reviews.find({"provider_id":provider_id}, {"_id":0}).sort("created_at", -1).to_list(50)
+    recommendations = await db.recommendations.find({"provider_id":provider_id}, {"_id":0,"recipient_email":0,"recommender_id":0}).sort("created_at", -1).to_list(12)
+    recommendations_total = await db.recommendations.count_documents({"provider_id":provider_id})
+    completed_services = await db.offers.count_documents({"provider_id":provider_id,"status":"completed"})
+    total = len(reviews); avg = round(sum(i["rating"] for i in reviews)/total, 1) if total else 0
+    primary_catalog = catalog[0] if catalog else {}
+    return {
+        "provider": {"id": str(provider["_id"]), "name": provider["name"], "role": provider["role"], "initials": initials(provider["name"]), "category": primary_catalog.get("category", provider.get("category", "Serviços gerais")), "share_url": public_profile_url(provider_id)},
+        "catalog": catalog,
+        "portfolio": portfolio,
+        "reviews": reviews,
+        "rating_average": avg,
+        "reviews_total": total,
+        "recommendations": recommendations,
+        "recommendations_total": recommendations_total,
+        "completed_services": completed_services,
+    }
+
+@api.post("/recommendations")
+async def create_recommendation(data: RecommendationInput, user=Depends(current_user)):
+    provider = await db.users.find_one({"_id":oid(data.provider_id),"role":"provider"}, {"password_hash":0})
+    if not provider: raise HTTPException(404, "Prestador não encontrado")
+    if str(provider["_id"]) == str(user["_id"]): raise HTTPException(400, "Você pode compartilhar seu perfil, mas a indicação precisa ser para outro profissional")
+    clean_message = (data.message or "").strip()
+    if clean_message and not polite_check(clean_message): raise HTTPException(400, "Por favor, use linguagem educada e respeitosa na indicação")
+    item = {"provider_id":data.provider_id,"provider_name":provider["name"],"recommender_id":str(user["_id"]),"recommender_name":user["name"],"recommender_role":user["role"],"recipient_name":data.recipient_name.strip(),"recipient_email":data.recipient_email.lower(),"message":clean_message,"created_at":datetime.now(timezone.utc).isoformat()}
+    result = await db.recommendations.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None)
+    link = public_profile_url(data.provider_id)
+    message_block = f"<p>{escape(clean_message)}</p>" if clean_message else ""
+    link_block = f"<p><a href='{escape(link)}'>Ver perfil público</a></p>" if link else ""
+    html_content = f"<p>Olá, {escape(item['recipient_name'])}.</p><p><strong>{escape(user['name'])}</strong> indicou <strong>{escape(provider['name'])}</strong> na ProMão.</p>{message_block}{link_block}"
+    schedule_email(item["recipient_email"], f"{user['name']} indicou um profissional na ProMão", html_content, "community_recommendation", str(user["_id"]), {"provider_id":data.provider_id,"recommendation_id":item["id"]})
+    schedule_email(provider["email"], "Seu perfil foi indicado na ProMão", f"<p>Olá, {escape(provider['name'])}.</p><p><strong>{escape(user['name'])}</strong> recomendou seu trabalho para {escape(item['recipient_name'])}.</p>", "provider_recommended", data.provider_id, {"recommendation_id":item["id"]})
+    return item
+
+@api.get("/recommendations/mine")
+async def my_recommendations(user=Depends(current_user)):
+    query = {"provider_id":str(user["_id"])} if user["role"] == "provider" else {"recommender_id":str(user["_id"])}
+    items = await db.recommendations.find(query, {"_id":0}).sort("created_at", -1).to_list(100)
+    return items
+
+@api.get("/notifications/mine")
+async def my_notifications(user=Depends(current_user)):
+    items = await db.email_notifications.find({"user_id":str(user["_id"])}, {"_id":0}).sort("created_at", -1).to_list(30)
+    return items
 
 @api.post("/reviews")
 async def review(data: ReviewInput, user=Depends(current_user)):

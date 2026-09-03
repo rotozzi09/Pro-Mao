@@ -1,0 +1,44 @@
+{
+  "summary": "Executed targeted backend+frontend regression for Community Recommendations, Public Provider Profile, and Email Notifications fallback on public URL. Backend pytest suite passed (8/8) validating public profile payload, recommendation permissions/politeness, /recommendations/mine behavior by role, skipped notification persistence without Resend config, and duplicate review prevention. Frontend Playwright checks validated /prestador/:id rendering, share/copy/login-gated recommendation area, client/provider recommendation actions, own-profile guard, and real 'Ver perfil' navigation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Global toast message",
+        "issue": "Success toast still appears sticky across navigation in some flows; it does not reliably auto-dismiss during end-to-end interactions.",
+        "selector": "[data-testid=success-message]",
+        "priority": "MEDIUM"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_community_public_profile_notifications.py",
+    "/app/test_reports/pytest/community_public_profile_notifications.xml"
+  ],
+  "action_items": [
+    "Investigate and stabilize toast auto-dismiss behavior after recommendation and route transitions.",
+    "Optional hardening: consider exposing full recommendation total (not only returned list length) if records exceed page slice."
+  ],
+  "critical_code_review_comments": [
+    "public_provider_profile sets recommendations_total=len(recommendations) after limiting list to 12; this can undercount real totals for highly recommended providers.",
+    "No brute-force lockout logic is present in /api/auth/login despite playbook verification expectations (security hardening gap)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_community_public_profile_notifications.py",
+    "/app/test_reports/iteration_4.json"
+  ],
+  "success_rate": {
+    "backend": "100% (8/8 targeted tests)",
+    "frontend": "~85% targeted acceptance checks"
+  },
+  "seed_data_creation": "Created disposable TEST_ client/provider/provider accounts and related request/offer/review/recommendation records via public APIs during pytest run.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Core requested flows are passing on backend and mostly validated in UI. If UI polish is addressed, re-run recommendation UI checks and verify toast lifecycle. Consider adding one UI scenario that deterministically creates+reviews an offer and confirms 'Atendimento avaliado' badge visibility.",
+  "rca of the issue": "Sticky toast behavior is likely state lifecycle related in App.js: message is shared app-wide and can persist while changing screens/users if not cleared consistently on transitions."
+}
