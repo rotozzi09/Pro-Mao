@@ -70,8 +70,20 @@ class PortfolioInput(BaseModel):
     caption: str = ""
     client_email: Optional[EmailStr] = None
 
+def role_list(user):
+    roles = user.get("roles") or [user.get("role")]
+    return [role for role in roles if role in ["client", "provider"]]
+
+def has_role(user, role: str):
+    return role in role_list(user)
+
+def provider_lookup(provider_id: str):
+    return {"_id":oid(provider_id),"$or":[{"role":"provider"},{"roles":"provider"}]}
+
 def public_user(user):
-    return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": user["role"], "google_linked": user.get("google_linked", False)}
+    roles = role_list(user)
+    primary_role = user.get("role") if user.get("role") in roles else (roles[0] if roles else "client")
+    return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": primary_role, "roles": roles, "google_linked": user.get("google_linked", False)}
 
 def initials(name: str):
     return "".join(x[0] for x in name.split()[:2]).upper() or "PM"
@@ -131,7 +143,7 @@ async def register(data: RegisterInput, response: Response):
     if data.role not in ["client", "provider"]: raise HTTPException(400, "Perfil inválido")
     email = data.email.lower()
     if await db.users.find_one({"email": email}): raise HTTPException(409, "Este e-mail já está cadastrado")
-    user = {"name": data.name.strip(), "email": email, "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(), "role": data.role, "google_linked": False, "created_at": datetime.now(timezone.utc).isoformat()}
+    user = {"name": data.name.strip(), "email": email, "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(), "role": data.role, "roles": [data.role], "google_linked": False, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.users.insert_one(user); user["_id"] = result.inserted_id
     response.set_cookie("access_token", token(user), httponly=True, samesite="none", secure=True, max_age=43200)
     return public_user(user)
@@ -145,6 +157,13 @@ async def login(data: LoginInput, response: Response):
 
 @api.get("/auth/me")
 async def me(user=Depends(current_user)): return public_user(user)
+
+@api.post("/users/enable-provider")
+async def enable_provider(user=Depends(current_user)):
+    roles = sorted(set(role_list(user) + ["client", "provider"]))
+    await db.users.update_one({"_id":user["_id"]},{"$set":{"roles":roles,"provider_enabled_at":datetime.now(timezone.utc).isoformat()}})
+    updated = await db.users.find_one({"_id":user["_id"]})
+    return public_user(updated)
 
 @api.post("/auth/logout")
 async def logout(request: Request, response: Response):
@@ -161,7 +180,7 @@ async def google_session(data: dict, response: Response):
     if result.status_code != 200: raise HTTPException(401, "Não foi possível validar o Google")
     info = result.json(); user = await db.users.find_one({"email": info["email"].lower()})
     if not user:
-        user = {"name":info.get("name", "Usuário Google"),"email":info["email"].lower(),"password_hash":"google-oauth","role":"client","google_linked":True,"created_at":datetime.now(timezone.utc).isoformat()}
+        user = {"name":info.get("name", "Usuário Google"),"email":info["email"].lower(),"password_hash":"google-oauth","role":"client","roles":["client"],"google_linked":True,"created_at":datetime.now(timezone.utc).isoformat()}
         created = await db.users.insert_one(user); user["_id"] = created.inserted_id
     else:
         await db.users.update_one({"_id":user["_id"]},{"$set":{"google_linked":True,"name":info.get("name",user["name"])}})
@@ -185,7 +204,7 @@ async def services(): return SERVICES
 
 @api.get("/providers")
 async def providers(category: Optional[str] = None, q: Optional[str] = None):
-    query = {"role":"provider"}
+    query = {"$or":[{"role":"provider"},{"roles":"provider"}]}
     if category and category != "Outras": query["category"] = category
     if q: query["$or"] = [{"name":{"$regex":q,"$options":"i"}},{"category":{"$regex":q,"$options":"i"}}]
     users = await db.users.find(query, {"_id":1,"name":1,"category":1,"services":1}).to_list(12)
@@ -211,21 +230,28 @@ async def create_request(data: RequestInput, user=Depends(current_user)):
     result = await db.requests.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
 
 @api.get("/requests")
-async def list_requests(user=Depends(current_user)):
-    query = {"client_id":str(user["_id"])} if user["role"] == "client" else {"status":"open"}
+async def list_requests(mode: Optional[str] = None, user=Depends(current_user)):
+    effective_mode = mode if mode in ["client", "provider"] else user.get("role")
+    if effective_mode == "provider":
+        if not has_role(user, "provider"): raise HTTPException(403, "Ative seu perfil de prestador para ver pedidos abertos")
+        query = {"status":"open"}
+    else:
+        if not has_role(user, "client"): raise HTTPException(403, "Apenas clientes veem seus pedidos")
+        query = {"client_id":str(user["_id"])}
     items = await db.requests.find(query).sort("created_at", -1).to_list(50)
-    if user["role"] == "provider":
+    if effective_mode == "provider":
         offered = await db.offers.find({"provider_id":str(user["_id"])}, {"_id":0, "request_id":1}).to_list(200)
         offered_ids = {item.get("request_id") for item in offered}
-        items = [item for item in items if str(item.get("_id")) not in offered_ids]
+        items = [item for item in items if str(item.get("_id")) not in offered_ids and item.get("client_id") != str(user["_id"])]
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
 @api.post("/requests/{request_id}/offers")
 async def create_offer(request_id: str, data: OfferInput, user=Depends(current_user)):
-    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores podem enviar propostas")
+    if not has_role(user, "provider"): raise HTTPException(403, "Ative seu perfil de prestador para enviar propostas")
     req = await db.requests.find_one({"_id":oid(request_id)})
     if not req: raise HTTPException(404, "Pedido não encontrado")
+    if req.get("client_id") == str(user["_id"]): raise HTTPException(400, "Você não pode enviar proposta para o próprio pedido")
     if req.get("status") != "open": raise HTTPException(400, "Este pedido não está mais aceitando propostas")
     existing = await db.offers.find_one({"request_id":request_id,"provider_id":str(user["_id"])}, {"_id": 1})
     if existing: raise HTTPException(409, "Você já enviou uma proposta para este pedido")
@@ -240,11 +266,12 @@ async def create_offer(request_id: str, data: OfferInput, user=Depends(current_u
 async def list_offers(request_id: str, user=Depends(current_user)):
     req = await db.requests.find_one({"_id":oid(request_id)})
     if not req: raise HTTPException(404, "Pedido não encontrado")
-    if user["role"] == "client":
-        if req.get("client_id") != str(user["_id"]): raise HTTPException(403, "Este pedido não é seu")
+    if req.get("client_id") == str(user["_id"]):
         items = await db.offers.find({"request_id":request_id}).sort("created_at", 1).to_list(50)
-    else:
+    elif has_role(user, "provider"):
         items = await db.offers.find({"request_id":request_id,"provider_id":str(user["_id"])}).to_list(50)
+    else:
+        raise HTTPException(403, "Você não faz parte deste pedido")
     for item in items:
         item["id"] = str(item.pop("_id"))
         item["reviewed"] = bool(await db.reviews.find_one({"offer_id": item["id"]}, {"_id": 1}))
@@ -252,7 +279,7 @@ async def list_offers(request_id: str, user=Depends(current_user)):
 
 @api.get("/offers/mine")
 async def my_offers(user=Depends(current_user)):
-    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores")
+    if not has_role(user, "provider"): raise HTTPException(403, "Ative seu perfil de prestador")
     offers = await db.offers.find({"provider_id":str(user["_id"])}).sort("created_at", -1).to_list(100)
     result = []
     for o in offers:
@@ -266,7 +293,7 @@ async def my_offers(user=Depends(current_user)):
 
 @api.post("/offers/{offer_id}/accept")
 async def accept_offer(offer_id: str, user=Depends(current_user)):
-    if user["role"] != "client": raise HTTPException(403, "Apenas clientes aceitam propostas")
+    if not has_role(user, "client"): raise HTTPException(403, "Apenas clientes aceitam propostas")
     offer = await db.offers.find_one({"_id":oid(offer_id)})
     if not offer: raise HTTPException(404, "Proposta não encontrada")
     req = await db.requests.find_one({"_id":oid(offer["request_id"])})
@@ -288,8 +315,8 @@ async def complete_offer(offer_id: str, user=Depends(current_user)):
     req = await db.requests.find_one({"_id":oid(offer["request_id"])})
     if not req: raise HTTPException(404, "Pedido não encontrado")
     field = None
-    if user["role"] == "client" and req.get("client_id") == str(user["_id"]): field = "client_completed"
-    elif user["role"] == "provider" and offer.get("provider_id") == str(user["_id"]): field = "provider_completed"
+    if has_role(user, "client") and req.get("client_id") == str(user["_id"]): field = "client_completed"
+    elif has_role(user, "provider") and offer.get("provider_id") == str(user["_id"]): field = "provider_completed"
     else: raise HTTPException(403, "Você não faz parte desta contratação")
     updates = {field: True, f"{field}_at": datetime.now(timezone.utc).isoformat()}
     both = (field == "client_completed" and offer.get("provider_completed")) or (field == "provider_completed" and offer.get("client_completed"))
@@ -309,7 +336,7 @@ async def provider_catalog(user=Depends(current_user)):
 
 @api.post("/provider/catalog")
 async def add_catalog(data: CatalogInput, user=Depends(current_user)):
-    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores possuem catálogo")
+    if not has_role(user, "provider"): raise HTTPException(403, "Ative seu perfil de prestador para criar catálogo")
     item = data.model_dump(); item.update({"provider_id":str(user["_id"]),"created_at":datetime.now(timezone.utc).isoformat()})
     result = await db.catalog.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
 
@@ -319,22 +346,22 @@ async def remove_catalog(item_id: str, user=Depends(current_user)):
     return {"ok":True}
 
 @api.get("/portfolio")
-async def portfolio(user=Depends(current_user)):
-    query = {"provider_id":str(user["_id"])} if user["role"] == "provider" else {"client_authorized":True}
+async def portfolio(mode: Optional[str] = None, user=Depends(current_user)):
+    query = {"provider_id":str(user["_id"])} if (mode == "provider" or user.get("role") == "provider") and has_role(user, "provider") else {"client_authorized":True}
     items = await db.portfolio.find(query).to_list(100)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
 @api.get("/portfolio/pending")
 async def pending_portfolio(user=Depends(current_user)):
-    if user["role"] != "client": raise HTTPException(403, "Apenas clientes autorizam fotos")
+    if not has_role(user, "client"): raise HTTPException(403, "Apenas clientes autorizam fotos")
     items = await db.portfolio.find({"client_email":user["email"],"client_authorized":False}).to_list(100)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
 @api.post("/portfolio")
 async def add_portfolio(data: PortfolioInput, user=Depends(current_user)):
-    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores podem publicar fotos")
+    if not has_role(user, "provider"): raise HTTPException(403, "Ative seu perfil de prestador para publicar fotos")
     item = data.model_dump(); item.update({"provider_id":str(user["_id"]),"client_authorized":False,"created_at":datetime.now(timezone.utc).isoformat()})
     result = await db.portfolio.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
 
@@ -354,7 +381,7 @@ def polite_check(text: str):
 
 @api.get("/providers/public/{provider_id}")
 async def public_provider_profile(provider_id: str):
-    provider = await db.users.find_one({"_id":oid(provider_id),"role":"provider"}, {"password_hash":0})
+    provider = await db.users.find_one(provider_lookup(provider_id), {"password_hash":0})
     if not provider: raise HTTPException(404, "Prestador não encontrado")
     catalog = await db.catalog.find({"provider_id":provider_id}, {"_id":0}).sort("created_at", -1).to_list(100)
     portfolio = await db.portfolio.find({"provider_id":provider_id,"client_authorized":True}, {"_id":0,"client_email":0}).sort("created_at", -1).to_list(24)
@@ -365,7 +392,7 @@ async def public_provider_profile(provider_id: str):
     total = len(reviews); avg = round(sum(i["rating"] for i in reviews)/total, 1) if total else 0
     primary_catalog = catalog[0] if catalog else {}
     return {
-        "provider": {"id": str(provider["_id"]), "name": provider["name"], "role": provider["role"], "initials": initials(provider["name"]), "category": primary_catalog.get("category", provider.get("category", "Serviços gerais")), "share_url": public_profile_url(provider_id)},
+        "provider": {"id": str(provider["_id"]), "name": provider["name"], "role": provider.get("role", "provider"), "roles": role_list(provider), "initials": initials(provider["name"]), "category": primary_catalog.get("category", provider.get("category", "Serviços gerais")), "share_url": public_profile_url(provider_id)},
         "catalog": catalog,
         "portfolio": portfolio,
         "reviews": reviews,
@@ -378,12 +405,12 @@ async def public_provider_profile(provider_id: str):
 
 @api.post("/recommendations")
 async def create_recommendation(data: RecommendationInput, user=Depends(current_user)):
-    provider = await db.users.find_one({"_id":oid(data.provider_id),"role":"provider"}, {"password_hash":0})
+    provider = await db.users.find_one(provider_lookup(data.provider_id), {"password_hash":0})
     if not provider: raise HTTPException(404, "Prestador não encontrado")
     if str(provider["_id"]) == str(user["_id"]): raise HTTPException(400, "Você pode compartilhar seu perfil, mas a indicação precisa ser para outro profissional")
     clean_message = (data.message or "").strip()
     if clean_message and not polite_check(clean_message): raise HTTPException(400, "Por favor, use linguagem educada e respeitosa na indicação")
-    item = {"provider_id":data.provider_id,"provider_name":provider["name"],"recommender_id":str(user["_id"]),"recommender_name":user["name"],"recommender_role":user["role"],"recipient_name":data.recipient_name.strip(),"recipient_email":data.recipient_email.lower(),"message":clean_message,"created_at":datetime.now(timezone.utc).isoformat()}
+    item = {"provider_id":data.provider_id,"provider_name":provider["name"],"recommender_id":str(user["_id"]),"recommender_name":user["name"],"recommender_role":user.get("role", "client"),"recipient_name":data.recipient_name.strip(),"recipient_email":data.recipient_email.lower(),"message":clean_message,"created_at":datetime.now(timezone.utc).isoformat()}
     result = await db.recommendations.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None)
     link = public_profile_url(data.provider_id)
     message_block = f"<p>{escape(clean_message)}</p>" if clean_message else ""
@@ -394,8 +421,8 @@ async def create_recommendation(data: RecommendationInput, user=Depends(current_
     return item
 
 @api.get("/recommendations/mine")
-async def my_recommendations(user=Depends(current_user)):
-    query = {"provider_id":str(user["_id"])} if user["role"] == "provider" else {"recommender_id":str(user["_id"])}
+async def my_recommendations(mode: Optional[str] = None, user=Depends(current_user)):
+    query = {"provider_id":str(user["_id"])} if (mode == "provider" or user.get("role") == "provider") and has_role(user, "provider") else {"recommender_id":str(user["_id"])}
     items = await db.recommendations.find(query, {"_id":0}).sort("created_at", -1).to_list(100)
     return items
 
@@ -406,7 +433,7 @@ async def my_notifications(user=Depends(current_user)):
 
 @api.post("/reviews")
 async def review(data: ReviewInput, user=Depends(current_user)):
-    if user["role"] != "client": raise HTTPException(403, "Apenas clientes avaliam")
+    if not has_role(user, "client"): raise HTTPException(403, "Apenas clientes avaliam")
     if data.rating < 1 or data.rating > 5: raise HTTPException(400, "Nota deve ser entre 1 e 5")
     if len(data.testimonial.strip()) < 10: raise HTTPException(400, "Escreva um depoimento com pelo menos 10 caracteres")
     if not polite_check(data.testimonial): raise HTTPException(400, "Por favor, use linguagem educada e respeitosa no depoimento")

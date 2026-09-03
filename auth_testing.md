@@ -9,3 +9,5 @@
 7. Provider: add a catalog item with and without product inclusion, upload a photo, and verify it remains pending authorization.
 8. Client: verify pending portfolio photos can be authorized and only authorized photos are returned publicly.
 9. Provider: publish a proposal against an open client request with price, ETA and conditions.
+10. Hybrid account: login as a client, call `POST /api/users/enable-provider`, verify `/api/auth/me` returns both roles, then verify `/api/requests?mode=client` returns owned requests and `/api/requests?mode=provider` returns open external requests.
+11. Hybrid UI: open the profile page, verify `role-mode-switcher`, click `activate-provider-button` when available, then switch between `mode-client-button` and `mode-provider-button`.
