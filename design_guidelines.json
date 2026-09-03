@@ -1,0 +1,59 @@
+{
+  "app_name": "ProMão - Serviços & Profissionais",
+  "app_type": "hybrid_fullstack",
+  "theme": "light",
+  "emotional_tone": "trustworthy, efficient, community-driven, warm, premium",
+  "color_palette": {
+    "primary": "#0F172A",
+    "secondary": "#3B82F6",
+    "accent": "#10B981",
+    "background": "#F8FAFC",
+    "card": "#FFFFFF",
+    "text": "#1E293B",
+    "muted": "#64748B",
+    "border": "#E2E8F0"
+  },
+  "typography": {
+    "heading_font": "Outfit, sans-serif",
+    "body_font": "Plus Jakarta Sans, sans-serif",
+    "sizes": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl",
+      "h3": "text-xl sm:text-2xl",
+      "body": "text-base"
+    }
+  },
+  "image_urls": [
+    {
+      "category": "service_hero",
+      "url": "https://images.unsplash.com/photo-1621905251189-08b45d6a269e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzV8MHwxfHNlYXJjaHwxfHxlbGVjdHJpY2lhbiUyMHBsdW1iZXIlMjBoYW5keW1hbiUyMHByb2Zlc3Npb25hbCUyMHdvcmtpbmd8ZW58MHx8fHwxNzg4NDQ0NjExfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Professional electrician at work"
+    },
+    {
+      "category": "service_plumber",
+      "url": "https://images.unsplash.com/photo-1676210133055-eab6ef033ce3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzV8MHwxfHNlYXJjaHwyfHxlbGVjdHJpY2lhbiUyMHBsdW1iZXIlMjBoYW5keW1hbiUyMHByb2Zlc3Npb25hbCUyMHdvcmtpbmd8ZW58MHx8fHwxNzg4NDQ0NjExfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Plumber fixing pipes"
+    },
+    {
+      "category": "living_room_cleaning",
+      "url": "https://images.unsplash.com/photo-1672860044506-e3ec09653e82?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTZ8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBjb3p5JTIwbGl2aW5nJTIwcm9vbSUyMGNsZWFuaW5nJTIwcGFpbnRpbmclMjBnYXJkZW5pbmd8ZW58MHx8fHwxNzg4NDQ0NjExfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Modern cozy clean living room"
+    },
+    {
+      "category": "handshake_trust",
+      "url": "https://images.unsplash.com/photo-1518135714426-c18f5ffb6f4d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzB8MHwxfHNlYXJjaHwyfHxoYXBweSUyMGNsaWVudCUyMGhvbWVvd25lciUyMHNlcnZpY2UlMjBwcm92aWRlciUyMGhhbmRzaGFrZXxlbnwwfHx8fDE3ODg0NDQ2MTF8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Handshake between client and professional"
+    }
+  ],
+  "universal_guidelines": [
+    "Ensure all interactive elements have data-testid attributes",
+    "Never use full transparent backgrounds in headers or overlays without proper backdrop blur",
+    "Use generous spacing (p-6 to p-12)",
+    "Maintain strict contrast ratios for text and buttons",
+    "Support dual profiles (Provider vs Client) with Google account linking and email/password login",
+    "Implement categories: Limpeza, Elétrica, Hidráulica, Pintura, Jardinagem, Montagem, Outras",
+    "Support service price configuration with or without product inclusion (following client specs)",
+    "Include portfolio with client privacy authorization toggle, ratings, and testimonials",
+    "Enable peer-to-peer and client-to-provider recommendations"
+  ]
+}

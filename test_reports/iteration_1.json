@@ -1,0 +1,53 @@
+{
+  "summary": "Tested the public ProMão preview across backend APIs and responsive UI. Core registration, login, session restoration, logout, protected request creation, services/providers, Google prepared messaging, navigation, and mobile layout passed.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "CORS preflight /api/auth/me",
+        "issue": "Public gateway returns Access-Control-Allow-Origin: * and omits Access-Control-Allow-Credentials on OPTIONS, despite backend configuring explicit FRONTEND_URL and credentials. Cross-origin credentialed preflight can fail.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Service search",
+        "issue": "The search input is not read; clicking the search arrow always calls search(\"\"), so typed service/professional queries do not filter results.",
+        "affected_selectors": ["[data-testid=service-search-input]", "[data-testid=service-search-button]"]
+      },
+      {
+        "flow": "Auth modal switch",
+        "issue": "The ‘Criar agora/Entrar’ switch only closes the modal instead of changing between register and login modes.",
+        "affected_selectors": ["[data-testid=auth-switch-button]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_promao_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix gateway/ingress OPTIONS CORS handling so explicit origin and allow-credentials are preserved.",
+    "Wire service-search input value into the providers search/filter request.",
+    "Make the auth modal switch toggle login/register rather than closing.",
+    "Consider preselecting provider role when the landing-page ‘Sou prestador’ CTA is used.",
+    "Implement or explicitly scope portfolio/photo authorization, testimonials, ratings, and recommendations; only a POST reviews endpoint exists and no UI is exposed.",
+    "Add brute-force lockout if required by the auth playbook; no lockout logic is present."
+  ],
+  "critical_code_review_comments": [
+    "Frontend fallback providers are demo data and category clicks can show the same unfiltered demo cards when the database is empty; this is MOCKED as specified.",
+    "Google OAuth linking is PREPARED/MOCKED and displays a next-step message; it is not an OAuth integration.",
+    "Suggested .local test emails in test_credentials.md are rejected by Pydantic EmailStr as reserved domains; use a routable test domain for automated registration tests."
+  ],
+  "updated_files": ["/app/backend/tests/test_promao_api.py", "/app/test_reports/iteration_1.json"],
+  "success_rate": {"backend": "86% (6/7)", "frontend": "100% of executed flows"},
+  "seed_data_creation": "Created temporary TEST_ users and requests through public registration/request flows; no seeded or production records modified.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Core public UI and API flows passed. Recheck CORS preflight at the public gateway, then verify search filtering and auth modal switching after fixes. Portfolio/reviews UI remains untested/unimplemented.",
+  "rca of the issue": "Search is disconnected because Home's arrow handler calls search(\"\") without reading the input state. Auth switching closes because AuthModal's switch handler invokes close() and App has no mode-toggle callback. Public OPTIONS CORS differs from backend middleware output, indicating ingress/CDN response rewriting or caching rather than the FastAPI route configuration."
+}
