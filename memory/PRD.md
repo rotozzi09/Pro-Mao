@@ -28,14 +28,20 @@ Criar uma ferramenta para prestadores de serviços gerais e clientes, com cadast
 - Estrutura backend para usuários, serviços, prestadores, pedidos e avaliações.
 - Vínculo Google sinalizado como fluxo preparado, ainda sem OAuth real.
 
+## What's been implemented (2026-09-03, phase 2)
+- Catálogo real do prestador com categoria, preço, produto incluído e exigências do cliente.
+- Painel do prestador com pedidos abertos e envio de propostas com preço, prazo e condições.
+- Upload de foto com legenda e e-mail do cliente; fotos começam privadas e aguardam autorização.
+- Área do cliente para autorizar a divulgação de fotos vinculadas ao seu e-mail.
+- Login Google real via OAuth gerenciado, troca server-side do `session_id` e cookie de sessão.
+
 ## Prioritized backlog
 ### P0
-- Implementar Google OAuth real com credenciais do projeto.
-- Completar catálogo do prestador: serviços, preço, produto incluso e portfólio.
+- Associar propostas a estados de atendimento e aceite do cliente.
+- Evoluir armazenamento de fotos para object storage dedicado em produção.
 ### P1
-- Fluxo de propostas e aceite entre cliente e prestador.
 - Avaliações e depoimentos vinculados a atendimentos concluídos.
-- Autorização de uso de fotos por atendimento.
+- Indicações entre clientes e prestadores.
 ### P2
 - Indicações entre usuários, notificações e filtros por localização.
 

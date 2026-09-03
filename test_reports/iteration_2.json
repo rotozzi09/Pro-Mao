@@ -1,0 +1,44 @@
+{
+  "summary": "Retested ProMão backend phase-two APIs and responsive UI. Core email auth, services, requests, provider catalog creation, public loading, search, and mobile landing layout work; phase-two authorization integration has blocking defects.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/portfolio/pending and /api/portfolio", "issue": "Responses project _id out but never add a serializable id. Pending photos therefore have no id, so the client UI sends an undefined id when authorizing; phase-two regression failed with KeyError('id').", "priority": "HIGH"},
+      {"endpoint": "/api/auth/google/session and current_user", "issue": "Google exchange sets only a session_token cookie, while current_user reads access_token or Authorization and never reads session_token. A successful Google exchange cannot authenticate subsequent protected requests.", "priority": "CRITICAL"},
+      {"endpoint": "CORS preflight /api/auth/me", "issue": "Public gateway OPTIONS response returns Access-Control-Allow-Origin: * and no Access-Control-Allow-Credentials, failing credentialed cross-origin preflight despite backend middleware configuration.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "/api/provider/catalog and /api/requests", "issue": "List projections exclude Mongo _id without replacing it with id; catalog/request list consumers cannot reliably identify records for later actions."},
+      {"endpoint": "/api/auth/register", "issue": "The required suggested credentials using @promao.local are rejected by EmailStr as a reserved domain (422); this is documented in test_credentials but still prevents those exact credentials from being used."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ProviderWorkspace", "issue": "Two-column workspace remains wider than the 390px viewport; measured body scrollWidth was 392px and the right column is clipped.", "selector": ".workspace-grid", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Client portfolio authorization", "issue": "Cannot complete from real response because pending portfolio records omit id; authorize-photo action receives undefined record id.", "affected_selectors": ["[data-testid^=pending-photo-]", "[data-testid^=authorize-photo-]"]},
+      {"flow": "Provider catalog refresh", "issue": "Catalog POST succeeds and API persistence was confirmed directly, but the UI refresh assertion did not show the item during the automated session; recheck after fixing list identity and async loading state.", "affected_selectors": ["[data-testid=catalog-submit-button]", "[data-testid^=catalog-item-]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_promao_api.py", "/app/backend/tests/test_phase2_features.py", "/app/test_reports/pytest/pytest_results_iteration2.xml", "/app/test_reports/pytest/phase2_results_iteration2.xml"],
+  "action_items": [
+    "Make current_user accept the Google session_token cookie or set the cookie name/token consistently with the auth dependency.",
+    "Add id: str(_id) to all protected list responses before excluding _id, especially pending/public portfolio records.",
+    "Fix ingress/CDN OPTIONS CORS response to return the explicit preview origin and Access-Control-Allow-Credentials: true.",
+    "Add a mobile breakpoint for .workspace-grid so provider workspace columns stack at small widths.",
+    "Re-run provider catalog refresh and complete client authorization after the response-id fix."
+  ],
+  "critical_code_review_comments": [
+    "Google OAuth is implemented as an exchange endpoint but is not wired into current_user, so the advertised real Google login is functionally broken after callback.",
+    "Mongo projections in phase-two list endpoints violate the frontend contract by removing _id without emitting id.",
+    "Portfolio image bytes are stored as MongoDB data URLs; this remains MOCKED storage as specified. Provider fallback cards are also MOCKED demo data when no providers exist."
+  ],
+  "updated_files": ["/app/backend/tests/test_phase2_features.py", "/app/test_reports/iteration_2.json"],
+  "success_rate": {"backend": "6/7 baseline passed; phase-two workflow failed at pending portfolio identity", "frontend": "Core loading/navigation/search/mobile landing passed; provider mobile overflow and phase-two authorization unresolved"},
+  "seed_data_creation": "Created temporary TEST_ provider/client accounts, one catalog item, request, offer, and pending portfolio photo through public APIs/UI; no seeded records modified.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Recheck Google callback session authentication, portfolio pending/public ids and authorization, provider catalog refresh, and 390px workspace overflow. Baseline auth/request tests are in test_promao_api.py; phase-two regression intentionally fails on missing portfolio id.",
+  "rca of the issue": "Phase-two endpoints use Mongo projections with _id:0 and return raw documents, so records lack the id expected by React actions. Google exchange stores a different cookie name (session_token) than current_user checks (access_token), making the exchanged session unusable. Provider CSS defines a permanent two-column grid and only adds mobile overrides for profile-columns, not workspace-grid."
+}

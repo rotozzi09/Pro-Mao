@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="1.845" timestamp="2026-09-03T14:27:35.623649+00:00" hostname="agent-env-1ac7a5e8-c544-4b14-895f-15925d60d05b"><testcase classname="tests.test_phase2_features" name="test_catalog_request_offer_and_portfolio_authorization" time="1.350"><failure message="KeyError: 'id'">backend/tests/test_phase2_features.py:47: in test_catalog_request_offer_and_portfolio_authorization
+    assert pending.status_code == 200 and any(p["id"] == photo_id for p in pending.json())
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend/tests/test_phase2_features.py:47: in &lt;genexpr&gt;
+    assert pending.status_code == 200 and any(p["id"] == photo_id for p in pending.json())
+                                              ^^^^^^^
+E   KeyError: 'id'</failure></testcase></testsuite></testsuites>

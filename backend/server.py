@@ -39,6 +39,23 @@ class ReviewInput(BaseModel):
     rating: int
     testimonial: str
 
+class CatalogInput(BaseModel):
+    name: str
+    category: str
+    price: float
+    includes_product: bool = False
+    product_requirements: Optional[str] = None
+
+class OfferInput(BaseModel):
+    price: float
+    eta: str
+    conditions: str
+
+class PortfolioInput(BaseModel):
+    image_data: str
+    caption: str = ""
+    client_email: Optional[EmailStr] = None
+
 def public_user(user):
     return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": user["role"], "google_linked": user.get("google_linked", False)}
 
@@ -47,10 +64,17 @@ def token(user):
     return jwt.encode({"sub": str(user["_id"]), "exp": datetime.now(timezone.utc) + timedelta(hours=12)}, secret, algorithm=JWT_ALGORITHM)
 
 async def current_user(request: Request):
-    raw = request.cookies.get("access_token") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    raw = request.cookies.get("access_token") or request.cookies.get("session_token") or request.headers.get("Authorization", "").replace("Bearer ", "")
     if not raw:
         raise HTTPException(401, "Faça login para continuar")
     try:
+        session = await db.user_sessions.find_one({"session_token": raw})
+        if session:
+            expires = datetime.fromisoformat(session["expires_at"]) if isinstance(session["expires_at"], str) else session["expires_at"]
+            if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+            if expires > datetime.now(timezone.utc):
+                user = await db.users.find_one({"_id": __import__("bson").ObjectId(session["user_id"])})
+                if user: return user
         payload = jwt.decode(raw, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
         user = await db.users.find_one({"_id": __import__("bson").ObjectId(payload["sub"])})
         if not user: raise HTTPException(401, "Conta não encontrada")
@@ -82,8 +106,28 @@ async def login(data: LoginInput, response: Response):
 async def me(user=Depends(current_user)): return public_user(user)
 
 @api.post("/auth/logout")
-async def logout(response: Response):
+async def logout(request: Request, response: Response):
+    raw = request.cookies.get("session_token")
+    if raw: await db.user_sessions.delete_one({"session_token": raw})
     response.delete_cookie("access_token"); return {"ok": True}
+
+@api.post("/auth/google/session")
+async def google_session(data: dict, response: Response):
+    session_id = data.get("session_id")
+    if not session_id: raise HTTPException(400, "Sessão Google ausente")
+    import requests
+    result = requests.get("https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data", headers={"X-Session-ID": session_id}, timeout=15)
+    if result.status_code != 200: raise HTTPException(401, "Não foi possível validar o Google")
+    info = result.json(); user = await db.users.find_one({"email": info["email"].lower()})
+    if not user:
+        user = {"name":info.get("name", "Usuário Google"),"email":info["email"].lower(),"password_hash":"google-oauth","role":"client","google_linked":True,"created_at":datetime.now(timezone.utc).isoformat()}
+        created = await db.users.insert_one(user); user["_id"] = created.inserted_id
+    else:
+        await db.users.update_one({"_id":user["_id"]},{"$set":{"google_linked":True,"name":info.get("name",user["name"])}})
+    expires = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({"user_id":str(user["_id"]),"session_token":info["session_token"],"expires_at":expires.isoformat()})
+    response.set_cookie("session_token", info["session_token"], httponly=True, samesite="none", secure=True, max_age=604800)
+    return public_user(user)
 
 SERVICES = [
     {"id":"cleaning", "name":"Limpeza", "icon":"✦", "tone":"mint", "description":"Casa leve, rotina tranquila"},
@@ -115,6 +159,68 @@ async def providers(category: Optional[str] = None, q: Optional[str] = None):
 async def create_request(data: RequestInput, user=Depends(current_user)):
     item = data.model_dump(); item.update({"client_id": str(user["_id"]), "created_at": datetime.now(timezone.utc).isoformat(), "status":"open"})
     result = await db.requests.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
+
+@api.get("/requests")
+async def list_requests(user=Depends(current_user)):
+    query = {"client_id":str(user["_id"])} if user["role"] == "client" else {}
+    items = await db.requests.find(query, {"_id":1}).sort("created_at", -1).to_list(50)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.post("/requests/{request_id}/offers")
+async def create_offer(request_id: str, data: OfferInput, user=Depends(current_user)):
+    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores podem enviar propostas")
+    offer = data.model_dump(); offer.update({"request_id":request_id,"provider_id":str(user["_id"]),"provider_name":user["name"],"created_at":datetime.now(timezone.utc).isoformat()})
+    result = await db.offers.insert_one(offer); offer["id"] = str(result.inserted_id); offer.pop("_id", None); return offer
+
+@api.get("/requests/{request_id}/offers")
+async def list_offers(request_id: str, user=Depends(current_user)):
+    items = await db.offers.find({"request_id":request_id},{"_id":1}).to_list(50)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.get("/provider/catalog")
+async def provider_catalog(user=Depends(current_user)):
+    items = await db.catalog.find({"provider_id":str(user["_id"])},{"_id":1}).to_list(100)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.post("/provider/catalog")
+async def add_catalog(data: CatalogInput, user=Depends(current_user)):
+    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores possuem catálogo")
+    item = data.model_dump(); item.update({"provider_id":str(user["_id"]),"created_at":datetime.now(timezone.utc).isoformat()})
+    result = await db.catalog.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
+
+@api.delete("/provider/catalog/{item_id}")
+async def remove_catalog(item_id: str, user=Depends(current_user)):
+    await db.catalog.delete_one({"_id":__import__("bson").ObjectId(item_id),"provider_id":str(user["_id"])})
+    return {"ok":True}
+
+@api.get("/portfolio")
+async def portfolio(user=Depends(current_user)):
+    query = {"provider_id":str(user["_id"])} if user["role"] == "provider" else {"client_authorized":True}
+    items = await db.portfolio.find(query,{"_id":1}).to_list(100)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.get("/portfolio/pending")
+async def pending_portfolio(user=Depends(current_user)):
+    if user["role"] != "client": raise HTTPException(403, "Apenas clientes autorizam fotos")
+    items = await db.portfolio.find({"client_email":user["email"],"client_authorized":False},{"_id":1}).to_list(100)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.post("/portfolio")
+async def add_portfolio(data: PortfolioInput, user=Depends(current_user)):
+    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores podem publicar fotos")
+    item = data.model_dump(); item.update({"provider_id":str(user["_id"]),"client_authorized":False,"created_at":datetime.now(timezone.utc).isoformat()})
+    result = await db.portfolio.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
+
+@api.post("/portfolio/{item_id}/authorize")
+async def authorize_portfolio(item_id: str, user=Depends(current_user)):
+    result = await db.portfolio.update_one({"_id":__import__("bson").ObjectId(item_id),"client_email":user["email"]},{"$set":{"client_authorized":True,"authorized_at":datetime.now(timezone.utc).isoformat()}})
+    if not result.modified_count: raise HTTPException(403, "Esta foto não está vinculada a você")
+    return {"ok":True}
 
 @api.post("/reviews")
 async def review(data: ReviewInput, user=Depends(current_user)):
