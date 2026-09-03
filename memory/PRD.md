@@ -35,6 +35,14 @@ Criar uma ferramenta para prestadores de serviços gerais e clientes, com cadast
 - Área do cliente para autorizar a divulgação de fotos vinculadas ao seu e-mail.
 - Login Google real via OAuth gerenciado, troca server-side do `session_id` e cookie de sessão.
 
+## What's been implemented (2026-09-03, phase 3)
+- Aceitação de propostas pelo cliente (POST /api/offers/{id}/accept), com propostas concorrentes marcadas como "não selecionadas" (visíveis).
+- Confirmação de conclusão em duas etapas (cliente + prestador) com estado do pedido virando "Concluído" quando ambos confirmam.
+- Novo endpoint GET /api/offers/mine para o prestador ver todas suas propostas com status.
+- Sistema de avaliações vinculado ao atendimento concluído (nota 1-5, depoimento mínimo 10 chars, filtro de linguagem educada, uma avaliação por atendimento).
+- Endpoint agregador GET /api/providers/{id}/reviews (média e total).
+- Correções: validação de ObjectId (400 em vez de 500), authz em GET /requests/{id}/offers, remoção de projeções que estavam ocultando dados de catálogo/portfólio, toast auto-dismiss, link "Entrar" visível no mobile.
+
 ## Prioritized backlog
 ### P0
 - Associar propostas a estados de atendimento e aceite do cliente.

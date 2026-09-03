@@ -1,0 +1,52 @@
+{
+  "summary": "Tested the new proposal-acceptance / both-parties-completion / reviews iteration end-to-end. Backend: new pytest suite (38 cases) at /app/backend/tests/test_proposal_flow.py covering listings returning full docs, accept flow, status transitions, dual completion, review validation (polite language, min length, rating range, duplicate 409, aggregation) and guardrails. 33/34 core cases pass. Frontend: full UI E2E on the public URL with freshly registered accounts (1 client + 2 providers) — request creation, 2 offers, accept, non-selected offer remains visible, client completion note, provider completion, request/offer 'Concluído', ReviewModal stars, rude-language error, polite submit toast, duplicate 409 error. All requested feature behaviours verified working. Remaining issues are pre-existing/edge-case: 500 on malformed ObjectId, no authz on GET /requests/{id}/offers, duplicate offers from same provider allowed, provider catalog/portfolio endpoints still project only _id (carry-over from iteration 2), toast never auto-dismisses, login link hidden on mobile.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/offers/{id}/accept, POST /api/offers/{id}/complete, POST /api/reviews", "issue": "Malformed ObjectId (e.g. /api/offers/bogusid/accept) raises bson.errors.InvalidId -> HTTP 500 instead of 400/404. Confirmed in backend.err.log.", "priority": "HIGH"},
+      {"endpoint": "GET /api/requests/{request_id}/offers", "issue": "No authorization check: any authenticated user (another client or unrelated provider) can read all offers, prices and provider names of another client's request. Returns 200.", "priority": "HIGH"},
+      {"endpoint": "GET /api/provider/catalog, GET /api/portfolio, GET /api/portfolio/pending", "issue": "Carry-over from iteration 2 - still use projection {\"_id\":1}, so responses contain only id. Provider catalog list and client photo-authorization cards therefore render empty (no name/category/price/image_data/caption). test_phase2_features.py fails with KeyError 'name'.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/requests/{id}/offers", "issue": "Same provider can submit unlimited offers on the same open request (200 each). Provider dashboard 'Pedidos abertos' also keeps showing requests already quoted, so duplicates are easy to create; client then sees several cards from the same provider."},
+      {"endpoint": "OPTIONS /api/* (preflight)", "issue": "App CORSMiddleware only allows localhost/FRONTEND_URL, so preflight is answered by ingress with Access-Control-Allow-Origin:* and no allow-credentials. Real requests work (custom middleware echoes origin), but the config is inconsistent - test_promao_api.py::test_cors_is_explicit_and_credentials_allowed fails."},
+      {"endpoint": "POST /api/auth/register", "issue": "/app/memory/test_credentials.md suggests @promao.local emails, which EmailStr rejects (422 'special-use or reserved name'). Credentials doc should use a valid domain."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Toast (App.js message state)", "issue": "Toast never auto-dismisses and is not cleared on view change or logout. Stale messages such as 'Serviço concluído!' remain visible after logging out and while a different user's screen/ReviewModal is open.", "selector": "[data-testid=\"success-message\"]", "priority": "MEDIUM"},
+      {"component": "ClientWorkspace offer card", "issue": "'Avaliar atendimento' button stays enabled after the review is published (no 'Avaliado' state); clicking again produces the 409 error inside the modal instead of preventing it.", "selector": "[data-testid=\"review-offer-0-0\"]", "priority": "LOW"},
+      {"component": "Topbar", "issue": "CSS .login-link{display:none} under 600px hides the 'Entrar' entry point on mobile; returning users must open 'Criar conta' and use the switch link to log in.", "selector": "[data-testid=\"login-open-button\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "ClientWorkspace / offers", "issues": ["Non-selected offer card uses opacity .6 on already-muted #64748b text, lowering contrast below comfortable readability", "Chip label for pending offers reads 'Aguardando cliente' on the client's own screen, which is confusing wording for the client viewing it"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_proposal_flow.py", "/app/test_reports/pytest/pytest_results.xml", "/app/test_reports/pytest/proposal_flow.xml"],
+  "action_items": [
+    "Wrap ObjectId(...) parsing in try/except (or a helper) in accept/complete/reviews and return 400/404 instead of 500",
+    "Add ownership/participation check to GET /api/requests/{request_id}/offers (client owner or offering provider only)",
+    "Remove the {\"_id\":1} projections in /provider/catalog, /portfolio and /portfolio/pending so full documents (name, price, image_data, caption) are returned",
+    "Block duplicate offers from the same provider on the same request (409) and/or hide already-quoted requests in the provider 'Pedidos abertos' list",
+    "Auto-dismiss the toast (timeout) and clear message on view change/logout",
+    "Hide/disable 'Avaliar atendimento' once a review exists (expose review state per offer)",
+    "Make the login entry point reachable on mobile (<=600px)",
+    "Align app CORS allow_origins with the preview origin or drop the duplicate custom middleware; update /app/memory/test_credentials.md to a valid email domain"
+  ],
+  "critical_code_review_comments": [
+    "ObjectId conversions are inlined with __import__('bson').ObjectId everywhere - extract one helper that validates the id and raises HTTPException(400) to remove the 500s and the repetition",
+    "list_offers is the only offer read path and has no authz; accept/complete correctly validate ownership, so the gap is inconsistent with the rest of the module",
+    "App.js is a single 100-line minified-style file where each component is one very long line; ClientWorkspace/ProviderWorkspace/ReviewModal should be split into modules for maintainability",
+    "ClientWorkspace.accept/complete use setOffersMap({...offersMap, ...}) from a stale closure - use the functional updater to avoid dropping other requests' offers after rapid actions",
+    "No loading/disabled state on Aceitar proposta / Marcar como concluído / Publicar depoimento buttons; double clicks fire duplicate POSTs"
+  ],
+  "updated_files": ["/app/backend/tests/test_proposal_flow.py", "/app/test_reports/iteration_3.json"],
+  "success_rate": {"backend": "84% (32/38 incl. intentional guard-gap probes; 33/34 of the feature suite)", "frontend": "100% of the requested acceptance/completion/review flows"},
+  "seed_data_creation": "UI accounts (password Promao123!): cliente_q703a@example.com (client, 1 completed request + review), prest1_q703a@example.com, prest2_q703a@example.com (providers). API tests create disposable test_*@example.com users.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "cliente_q703a@example.com / prest1_q703a@example.com / prest2_q703a@example.com — password Promao123!. Note: /app/memory/test_credentials.md still lists @promao.local addresses which the backend rejects (422).",
+  "context_for_next_testing_agent": "All new-iteration features (accept, not_selected visibility, dual completion, review polite check, duplicate 409, aggregation endpoint) are verified working on the public URL. Regression suite: /app/backend/tests/test_proposal_flow.py (TestGuardGaps intentionally fails until the 4 gaps are fixed). Still open from iteration 2: catalog/portfolio projections and Google session cookie name. Retest after the ObjectId/authz/projection fixes.",
+  "rca_of_the_issue": "500s come from bson.ObjectId() being called on unvalidated path/body ids inside the try-less handlers (accept/complete) and reviews. The offers-read leak is because list_offers filters only by request_id without comparing the caller to req.client_id or offer.provider_id. The empty catalog/portfolio lists are caused by Mongo projections {'_id':1} that strip every business field."
+}

@@ -9,6 +9,12 @@ from typing import Optional, List
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import os, bcrypt, jwt
+from bson import ObjectId
+from bson.errors import InvalidId
+
+def oid(value: str):
+    try: return ObjectId(value)
+    except (InvalidId, TypeError): raise HTTPException(400, "Identificador inválido")
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -35,7 +41,7 @@ class RequestInput(BaseModel):
     budget: Optional[str] = None
 
 class ReviewInput(BaseModel):
-    provider_id: str
+    offer_id: str
     rating: int
     testimonial: str
 
@@ -73,10 +79,10 @@ async def current_user(request: Request):
             expires = datetime.fromisoformat(session["expires_at"]) if isinstance(session["expires_at"], str) else session["expires_at"]
             if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
             if expires > datetime.now(timezone.utc):
-                user = await db.users.find_one({"_id": __import__("bson").ObjectId(session["user_id"])})
+                user = await db.users.find_one({"_id": oid(session["user_id"])})
                 if user: return user
         payload = jwt.decode(raw, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
-        user = await db.users.find_one({"_id": __import__("bson").ObjectId(payload["sub"])})
+        user = await db.users.find_one({"_id": oid(payload["sub"])})
         if not user: raise HTTPException(401, "Conta não encontrada")
         return user
     except Exception:
@@ -162,26 +168,83 @@ async def create_request(data: RequestInput, user=Depends(current_user)):
 
 @api.get("/requests")
 async def list_requests(user=Depends(current_user)):
-    query = {"client_id":str(user["_id"])} if user["role"] == "client" else {}
-    items = await db.requests.find(query, {"_id":1}).sort("created_at", -1).to_list(50)
+    query = {"client_id":str(user["_id"])} if user["role"] == "client" else {"status":"open"}
+    items = await db.requests.find(query).sort("created_at", -1).to_list(50)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
 @api.post("/requests/{request_id}/offers")
 async def create_offer(request_id: str, data: OfferInput, user=Depends(current_user)):
     if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores podem enviar propostas")
-    offer = data.model_dump(); offer.update({"request_id":request_id,"provider_id":str(user["_id"]),"provider_name":user["name"],"created_at":datetime.now(timezone.utc).isoformat()})
+    req = await db.requests.find_one({"_id":oid(request_id)})
+    if not req: raise HTTPException(404, "Pedido não encontrado")
+    if req.get("status") != "open": raise HTTPException(400, "Este pedido não está mais aceitando propostas")
+    offer = data.model_dump(); offer.update({"request_id":request_id,"provider_id":str(user["_id"]),"provider_name":user["name"],"status":"pending","client_completed":False,"provider_completed":False,"created_at":datetime.now(timezone.utc).isoformat()})
     result = await db.offers.insert_one(offer); offer["id"] = str(result.inserted_id); offer.pop("_id", None); return offer
 
 @api.get("/requests/{request_id}/offers")
 async def list_offers(request_id: str, user=Depends(current_user)):
-    items = await db.offers.find({"request_id":request_id},{"_id":1}).to_list(50)
+    req = await db.requests.find_one({"_id":oid(request_id)})
+    if not req: raise HTTPException(404, "Pedido não encontrado")
+    if user["role"] == "client":
+        if req.get("client_id") != str(user["_id"]): raise HTTPException(403, "Este pedido não é seu")
+        items = await db.offers.find({"request_id":request_id}).sort("created_at", 1).to_list(50)
+    else:
+        items = await db.offers.find({"request_id":request_id,"provider_id":str(user["_id"])}).to_list(50)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
+@api.get("/offers/mine")
+async def my_offers(user=Depends(current_user)):
+    if user["role"] != "provider": raise HTTPException(403, "Apenas prestadores")
+    offers = await db.offers.find({"provider_id":str(user["_id"])}).sort("created_at", -1).to_list(100)
+    result = []
+    for o in offers:
+        o["id"] = str(o.pop("_id"))
+        try:
+            req = await db.requests.find_one({"_id":oid(o["request_id"])})
+            if req: o["request"] = {"service":req.get("service"),"category":req.get("category"),"description":req.get("description"),"status":req.get("status")}
+        except Exception: pass
+        result.append(o)
+    return result
+
+@api.post("/offers/{offer_id}/accept")
+async def accept_offer(offer_id: str, user=Depends(current_user)):
+    if user["role"] != "client": raise HTTPException(403, "Apenas clientes aceitam propostas")
+    offer = await db.offers.find_one({"_id":oid(offer_id)})
+    if not offer: raise HTTPException(404, "Proposta não encontrada")
+    req = await db.requests.find_one({"_id":oid(offer["request_id"])})
+    if not req or req.get("client_id") != str(user["_id"]): raise HTTPException(403, "Este pedido não é seu")
+    if req.get("status") != "open": raise HTTPException(400, "Este pedido já foi encaminhado")
+    await db.offers.update_one({"_id":offer["_id"]},{"$set":{"status":"accepted","accepted_at":datetime.now(timezone.utc).isoformat()}})
+    await db.offers.update_many({"request_id":offer["request_id"],"_id":{"$ne":offer["_id"]}},{"$set":{"status":"not_selected"}})
+    await db.requests.update_one({"_id":req["_id"]},{"$set":{"status":"in_progress","accepted_offer_id":str(offer["_id"]),"accepted_provider_id":offer["provider_id"]}})
+    return {"ok":True}
+
+@api.post("/offers/{offer_id}/complete")
+async def complete_offer(offer_id: str, user=Depends(current_user)):
+    offer = await db.offers.find_one({"_id":oid(offer_id)})
+    if not offer: raise HTTPException(404, "Proposta não encontrada")
+    if offer.get("status") not in ["accepted","client_completed","provider_completed"]: raise HTTPException(400, "Proposta ainda não foi aceita")
+    req = await db.requests.find_one({"_id":oid(offer["request_id"])})
+    if not req: raise HTTPException(404, "Pedido não encontrado")
+    field = None
+    if user["role"] == "client" and req.get("client_id") == str(user["_id"]): field = "client_completed"
+    elif user["role"] == "provider" and offer.get("provider_id") == str(user["_id"]): field = "provider_completed"
+    else: raise HTTPException(403, "Você não faz parte desta contratação")
+    updates = {field: True, f"{field}_at": datetime.now(timezone.utc).isoformat()}
+    both = (field == "client_completed" and offer.get("provider_completed")) or (field == "provider_completed" and offer.get("client_completed"))
+    if both:
+        updates["status"] = "completed"; updates["completed_at"] = datetime.now(timezone.utc).isoformat()
+        await db.requests.update_one({"_id":req["_id"]},{"$set":{"status":"completed"}})
+    else:
+        updates["status"] = field
+    await db.offers.update_one({"_id":offer["_id"]},{"$set":updates})
+    return {"ok":True, "completed": both}
+
 @api.get("/provider/catalog")
 async def provider_catalog(user=Depends(current_user)):
-    items = await db.catalog.find({"provider_id":str(user["_id"])},{"_id":1}).to_list(100)
+    items = await db.catalog.find({"provider_id":str(user["_id"])}).to_list(100)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
@@ -193,20 +256,20 @@ async def add_catalog(data: CatalogInput, user=Depends(current_user)):
 
 @api.delete("/provider/catalog/{item_id}")
 async def remove_catalog(item_id: str, user=Depends(current_user)):
-    await db.catalog.delete_one({"_id":__import__("bson").ObjectId(item_id),"provider_id":str(user["_id"])})
+    await db.catalog.delete_one({"_id":oid(item_id),"provider_id":str(user["_id"])})
     return {"ok":True}
 
 @api.get("/portfolio")
 async def portfolio(user=Depends(current_user)):
     query = {"provider_id":str(user["_id"])} if user["role"] == "provider" else {"client_authorized":True}
-    items = await db.portfolio.find(query,{"_id":1}).to_list(100)
+    items = await db.portfolio.find(query).to_list(100)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
 @api.get("/portfolio/pending")
 async def pending_portfolio(user=Depends(current_user)):
     if user["role"] != "client": raise HTTPException(403, "Apenas clientes autorizam fotos")
-    items = await db.portfolio.find({"client_email":user["email"],"client_authorized":False},{"_id":1}).to_list(100)
+    items = await db.portfolio.find({"client_email":user["email"],"client_authorized":False}).to_list(100)
     for item in items: item["id"] = str(item.pop("_id"))
     return items
 
@@ -218,14 +281,40 @@ async def add_portfolio(data: PortfolioInput, user=Depends(current_user)):
 
 @api.post("/portfolio/{item_id}/authorize")
 async def authorize_portfolio(item_id: str, user=Depends(current_user)):
-    result = await db.portfolio.update_one({"_id":__import__("bson").ObjectId(item_id),"client_email":user["email"]},{"$set":{"client_authorized":True,"authorized_at":datetime.now(timezone.utc).isoformat()}})
+    result = await db.portfolio.update_one({"_id":oid(item_id),"client_email":user["email"]},{"$set":{"client_authorized":True,"authorized_at":datetime.now(timezone.utc).isoformat()}})
     if not result.modified_count: raise HTTPException(403, "Esta foto não está vinculada a você")
     return {"ok":True}
 
+RUDE_TERMS = ["idiota","imbecil","burro","otário","otario","lixo","merda","porra","cretino","estúpido","estupido","incompetente","ladrão","ladrao","desgraçad","desgracad"]
+
+def polite_check(text: str):
+    lower = text.lower()
+    for term in RUDE_TERMS:
+        if term in lower: return False
+    return True
+
 @api.post("/reviews")
 async def review(data: ReviewInput, user=Depends(current_user)):
-    item = data.model_dump(); item.update({"client_id":str(user["_id"]),"client_name":user["name"],"created_at":datetime.now(timezone.utc).isoformat()})
-    await db.reviews.insert_one(item); item.pop("_id", None); return item
+    if user["role"] != "client": raise HTTPException(403, "Apenas clientes avaliam")
+    if data.rating < 1 or data.rating > 5: raise HTTPException(400, "Nota deve ser entre 1 e 5")
+    if len(data.testimonial.strip()) < 10: raise HTTPException(400, "Escreva um depoimento com pelo menos 10 caracteres")
+    if not polite_check(data.testimonial): raise HTTPException(400, "Por favor, use linguagem educada e respeitosa no depoimento")
+    offer = await db.offers.find_one({"_id":oid(data.offer_id)})
+    if not offer: raise HTTPException(404, "Contratação não encontrada")
+    if offer.get("status") != "completed": raise HTTPException(400, "Só é possível avaliar após conclusão do serviço")
+    req = await db.requests.find_one({"_id":oid(offer["request_id"])})
+    if not req or req.get("client_id") != str(user["_id"]): raise HTTPException(403, "Você não contratou este serviço")
+    existing = await db.reviews.find_one({"offer_id":data.offer_id,"client_id":str(user["_id"])})
+    if existing: raise HTTPException(409, "Você já avaliou este atendimento")
+    item = data.model_dump(); item.update({"provider_id":offer["provider_id"],"client_id":str(user["_id"]),"client_name":user["name"],"created_at":datetime.now(timezone.utc).isoformat()})
+    result = await db.reviews.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
+
+@api.get("/providers/{provider_id}/reviews")
+async def provider_reviews(provider_id: str):
+    items = await db.reviews.find({"provider_id":provider_id}).sort("created_at", -1).to_list(50)
+    for item in items: item["id"] = str(item.pop("_id"))
+    total = len(items); avg = round(sum(i["rating"] for i in items)/total, 1) if total else 0
+    return {"reviews": items, "average": avg, "total": total}
 
 @api.post("/auth/link-google")
 async def link_google(user=Depends(current_user)):
