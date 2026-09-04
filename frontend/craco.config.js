@@ -125,6 +125,8 @@ webpackConfig.devServer = (devServerConfig) => {
     };
   }
 
+  // Allow the preview's external hostname (changes per environment) in the dev server.
+  devServerConfig.allowedHosts = "all";
   return devServerConfig;
 };
 
