@@ -1,0 +1,17 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "RESEND_API_KEY",
+      "description": "Resend email API key (https://resend.com/api-keys). Optional — email notifications are silently skipped if not set, so the app boots and works without it.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "SENDER_EMAIL",
+      "description": "Verified sender address for Resend (e.g. noreply@yourdomain.com). Optional — only needed together with RESEND_API_KEY to enable email notifications.",
+      "requiredAtBoot": false
+    }
+  ]
+}

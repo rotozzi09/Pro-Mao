@@ -3,7 +3,7 @@ FROM node:22
 WORKDIR /app
 
 COPY package.json .
-RUN yarn install --frozen-lockfile=false
+RUN yarn install --network-timeout 600000
 
 EXPOSE 3000
 CMD ["yarn", "start"]
