@@ -70,6 +70,9 @@ class PortfolioInput(BaseModel):
     caption: str = ""
     client_email: Optional[EmailStr] = None
 
+class MessageInput(BaseModel):
+    text: str
+
 def role_list(user):
     roles = user.get("roles") or [user.get("role")]
     return [role for role in roles if role in ["client", "provider"]]
@@ -327,6 +330,35 @@ async def complete_offer(offer_id: str, user=Depends(current_user)):
         updates["status"] = field
     await db.offers.update_one({"_id":offer["_id"]},{"$set":updates})
     return {"ok":True, "completed": both}
+
+async def chat_participants(offer_id: str, user):
+    offer = await db.offers.find_one({"_id": oid(offer_id)})
+    if not offer: raise HTTPException(404, "Conversa não encontrada")
+    req = await db.requests.find_one({"_id": oid(offer["request_id"])})
+    if not req: raise HTTPException(404, "Pedido não encontrado")
+    if str(user["_id"]) != req.get("client_id") and str(user["_id"]) != offer.get("provider_id"):
+        raise HTTPException(403, "Você não participa desta conversa")
+    return offer, req
+
+@api.get("/offers/{offer_id}/messages")
+async def list_messages(offer_id: str, user=Depends(current_user)):
+    offer, req = await chat_participants(offer_id, user)
+    messages = await db.messages.find({"offer_id": offer_id}).sort("created_at", 1).to_list(200)
+    for m in messages: m["id"] = str(m.pop("_id"))
+    return messages
+
+@api.post("/offers/{offer_id}/messages")
+async def send_message(offer_id: str, data: MessageInput, user=Depends(current_user)):
+    offer, req = await chat_participants(offer_id, user)
+    text = data.text.strip()
+    if not text: raise HTTPException(400, "Escreva uma mensagem")
+    if len(text) > 1000: raise HTTPException(400, "A mensagem é muito longa")
+    if not polite_check(text): raise HTTPException(400, "Por favor, use linguagem educada e respeitosa na conversa")
+    if offer.get("status") in ("pending", "not_selected"): raise HTTPException(400, "A conversa abre após a proposta ser aceita")
+    msg = {"offer_id": offer_id, "request_id": offer["request_id"], "sender_id": str(user["_id"]), "sender_name": user["name"], "text": text, "created_at": datetime.now(timezone.utc).isoformat()}
+    result = await db.messages.insert_one(msg)
+    msg["id"] = str(result.inserted_id); msg.pop("_id")
+    return msg
 
 @api.get("/provider/catalog")
 async def provider_catalog(user=Depends(current_user)):
