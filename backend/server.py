@@ -493,7 +493,7 @@ async def link_google(user=Depends(current_user)):
 
 app.include_router(api)
 origins = [os.environ.get("FRONTEND_URL", "http://localhost:3000"), "http://localhost:3000"]
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=origins, allow_methods=["*"], allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"])
 
 @app.middleware("http")
 async def preserve_request_origin(request: Request, call_next):
@@ -503,7 +503,7 @@ async def preserve_request_origin(request: Request, call_next):
         response.headers["access-control-allow-origin"] = origin
         response.headers["access-control-allow-credentials"] = "true"
         response.headers["access-control-allow-methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        response.headers["access-control-allow-headers"] = "*"
+        response.headers["access-control-allow-headers"] = "Content-Type, Authorization, Accept, X-Requested-With"
     return response
 
 @app.on_event("startup")
