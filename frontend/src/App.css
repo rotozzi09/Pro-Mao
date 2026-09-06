@@ -36,3 +36,42 @@
 .heart-btn.favorited{color:#ef4444;background:#ffffff50}
 @media(max-width:900px){.admin-stats-grid{grid-template-columns:repeat(3,1fr)}.notif-dropdown{width:300px}}
 @media(max-width:600px){.admin-stats-grid{grid-template-columns:repeat(2,1fr)}.apt-datetime{grid-template-columns:1fr}.notif-dropdown{right:-60px;width:280px}}
+
+/* === UX Improvements === */
+html{scroll-behavior:smooth}
+body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
+button{touch-action:manipulation}
+button:active{transform:scale(.97)}
+.primary-btn:active,.outline-btn:active,.dark-btn:active{transform:scale(.97)}
+
+/* View transitions */
+main{animation:viewFade .35s ease}
+@keyframes viewFade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* Active nav links */
+.nav-links button.active{color:var(--ink);font-weight:600}
+.nav-links button.active::after{content:'';display:block;width:20px;height:2px;background:var(--ink);margin:3px auto 0;border-radius:1px}
+
+/* Search clear */
+.search-clear{position:absolute;right:48px;top:50%;transform:translateY(-50%);color:var(--muted);padding:4px;display:grid;place-items:center;transition:color .2s}
+.search-clear:hover{color:var(--ink)}
+
+/* Welcome stats */
+.welcome-stats{display:flex;justify-content:center;gap:clamp(24px,5vw,56px);padding:28px 0 0}
+.welcome-stats>div{text-align:center}
+.welcome-stats b{font:700 clamp(28px,4vw,36px) Outfit;color:var(--ink);display:block}
+.welcome-stats small{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+
+/* Mobile bottom nav */
+.mobile-nav{display:none;position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);z-index:50;padding:6px 0 env(safe-area-inset-bottom,8px);box-shadow:0 -4px 20px #0f172a08}
+.mobile-nav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 4px;color:var(--muted);font-size:9px;font-weight:600;transition:color .2s}
+.mobile-nav button.active{color:var(--ink)}
+.mobile-nav button.active svg{color:#0f766e}
+
+/* Toast above bottom nav on mobile */
+@media(max-width:900px){
+  .mobile-nav{display:flex}
+  .toast{bottom:72px}
+  footer{padding-bottom:72px}
+  .welcome-stats{gap:20px}
+}

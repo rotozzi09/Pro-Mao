@@ -32,7 +32,7 @@ export default function AppointmentModal({ providerId, providerName, user, close
           </label>
           <div className="apt-datetime">
             <label>Data
-              <input data-testid="apt-date-input" type="date" required value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
+              <input data-testid="apt-date-input" type="date" min={new Date().toISOString().split('T')[0]} required value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
             </label>
             <label>Hora
               <input data-testid="apt-time-input" type="time" required value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} />
