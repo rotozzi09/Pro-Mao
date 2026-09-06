@@ -73,9 +73,28 @@ class PortfolioInput(BaseModel):
 class MessageInput(BaseModel):
     text: str
 
+class UpdateProfileInput(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    avatar_data: Optional[str] = None
+
+class AppointmentInput(BaseModel):
+    provider_id: str
+    service: str
+    date: str
+    time: str
+    notes: Optional[str] = None
+
+class AppointmentStatusInput(BaseModel):
+    status: str
+
+class AdminUserUpdate(BaseModel):
+    banned: Optional[bool] = None
+    roles: Optional[List[str]] = None
+
 def role_list(user):
     roles = user.get("roles") or [user.get("role")]
-    return [role for role in roles if role in ["client", "provider"]]
+    return [role for role in roles if role in ["client", "provider", "admin"]]
 
 def has_role(user, role: str):
     return role in role_list(user)
@@ -86,7 +105,7 @@ def provider_lookup(provider_id: str):
 def public_user(user):
     roles = role_list(user)
     primary_role = user.get("role") if user.get("role") in roles else (roles[0] if roles else "client")
-    return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": primary_role, "roles": roles, "google_linked": user.get("google_linked", False)}
+    return {"id": str(user.get("_id", user.get("id"))), "name": user["name"], "email": user["email"], "role": primary_role, "roles": roles, "google_linked": user.get("google_linked", False), "avatar_data": user.get("avatar_data")}
 
 def initials(name: str):
     return "".join(x[0] for x in name.split()[:2]).upper() or "PM"
@@ -110,10 +129,13 @@ async def current_user(request: Request):
             if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
             if expires > datetime.now(timezone.utc):
                 user = await db.users.find_one({"_id": oid(session["user_id"])})
-                if user: return user
+                if user:
+                    if user.get("banned"): raise HTTPException(403, "Esta conta foi suspensa")
+                    return user
         payload = jwt.decode(raw, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
         user = await db.users.find_one({"_id": oid(payload["sub"])})
         if not user: raise HTTPException(401, "Conta não encontrada")
+        if user.get("banned"): raise HTTPException(403, "Esta conta foi suspensa")
         return user
     except Exception:
         raise HTTPException(401, "Sessão expirada")
@@ -263,6 +285,7 @@ async def create_offer(request_id: str, data: OfferInput, user=Depends(current_u
     client_user = await db.users.find_one({"_id":oid(req["client_id"])}, {"_id":0,"email":1,"name":1})
     if client_user:
         schedule_email(client_user["email"], "Você recebeu uma proposta na ProMão", f"<p>Olá, {escape(client_user['name'])}.</p><p><strong>{escape(user['name'])}</strong> enviou uma proposta para <strong>{escape(req.get('service','seu pedido'))}</strong>.</p>", "offer_created", req["client_id"], {"offer_id": offer["id"], "request_id": request_id})
+    await create_notification(req["client_id"], "offer", "Nova proposta recebida", f"{user['name']} enviou uma proposta para {req.get('service', 'seu pedido')}")
     return offer
 
 @api.get("/requests/{request_id}/offers")
@@ -308,6 +331,7 @@ async def accept_offer(offer_id: str, user=Depends(current_user)):
     provider = await db.users.find_one({"_id":oid(offer["provider_id"])}, {"_id":0,"email":1,"name":1})
     if provider:
         schedule_email(provider["email"], "Sua proposta foi aceita na ProMão", f"<p>Olá, {escape(provider['name'])}.</p><p>Sua proposta para <strong>{escape(req.get('service','um serviço'))}</strong> foi aceita. Combine os próximos passos com o cliente pela plataforma.</p>", "offer_accepted", offer["provider_id"], {"offer_id": str(offer["_id"]), "request_id": offer["request_id"]})
+    await create_notification(offer["provider_id"], "offer", "Proposta aceita", f"Sua proposta para {req.get('service', 'um serviço')} foi aceita pelo cliente")
     return {"ok":True}
 
 @api.post("/offers/{offer_id}/complete")
@@ -358,6 +382,8 @@ async def send_message(offer_id: str, data: MessageInput, user=Depends(current_u
     msg = {"offer_id": offer_id, "request_id": offer["request_id"], "sender_id": str(user["_id"]), "sender_name": user["name"], "text": text, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.messages.insert_one(msg)
     msg["id"] = str(result.inserted_id); msg.pop("_id")
+    other_id = req["client_id"] if str(user["_id"]) == offer["provider_id"] else offer["provider_id"]
+    await create_notification(other_id, "message", "Nova mensagem", f"{user['name']}: {text[:60]}")
     return msg
 
 @api.get("/provider/catalog")
@@ -411,6 +437,11 @@ def polite_check(text: str):
         if term in lower: return False
     return True
 
+async def create_notification(user_id, ntype, title, body, link=None):
+    notif = {"user_id": user_id, "type": ntype, "title": title, "body": body, "read": False, "created_at": datetime.now(timezone.utc).isoformat()}
+    if link: notif["link"] = link
+    await db.notifications.insert_one(notif)
+
 @api.get("/providers/public/{provider_id}")
 async def public_provider_profile(provider_id: str):
     provider = await db.users.find_one(provider_lookup(provider_id), {"password_hash":0})
@@ -450,6 +481,7 @@ async def create_recommendation(data: RecommendationInput, user=Depends(current_
     html_content = f"<p>Olá, {escape(item['recipient_name'])}.</p><p><strong>{escape(user['name'])}</strong> indicou <strong>{escape(provider['name'])}</strong> na ProMão.</p>{message_block}{link_block}"
     schedule_email(item["recipient_email"], f"{user['name']} indicou um profissional na ProMão", html_content, "community_recommendation", str(user["_id"]), {"provider_id":data.provider_id,"recommendation_id":item["id"]})
     schedule_email(provider["email"], "Seu perfil foi indicado na ProMão", f"<p>Olá, {escape(provider['name'])}.</p><p><strong>{escape(user['name'])}</strong> recomendou seu trabalho para {escape(item['recipient_name'])}.</p>", "provider_recommended", data.provider_id, {"recommendation_id":item["id"]})
+    await create_notification(data.provider_id, "recommendation", "Nova indicação", f"{user['name']} indicou você para {item['recipient_name']}")
     return item
 
 @api.get("/recommendations/mine")
@@ -477,7 +509,9 @@ async def review(data: ReviewInput, user=Depends(current_user)):
     existing = await db.reviews.find_one({"offer_id":data.offer_id,"client_id":str(user["_id"])})
     if existing: raise HTTPException(409, "Você já avaliou este atendimento")
     item = data.model_dump(); item.update({"provider_id":offer["provider_id"],"client_id":str(user["_id"]),"client_name":user["name"],"created_at":datetime.now(timezone.utc).isoformat()})
-    result = await db.reviews.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None); return item
+    result = await db.reviews.insert_one(item); item["id"] = str(result.inserted_id); item.pop("_id", None)
+    await create_notification(offer["provider_id"], "review", "Nova avaliação", f"{user['name']} avaliou seu serviço com nota {data.rating}")
+    return item
 
 @api.get("/providers/{provider_id}/reviews")
 async def provider_reviews(provider_id: str):
@@ -490,6 +524,170 @@ async def provider_reviews(provider_id: str):
 async def link_google(user=Depends(current_user)):
     await db.users.update_one({"_id":user["_id"]},{"$set":{"google_linked":True}})
     return {"message":"Vínculo preparado. A conexão Google será ativada na próxima etapa.","google_linked":True}
+
+# === FAVORITOS ===
+@api.post("/favorites/{provider_id}")
+async def toggle_favorite(provider_id: str, user=Depends(current_user)):
+    existing = await db.favorites.find_one({"user_id": str(user["_id"]), "provider_id": provider_id})
+    if existing:
+        await db.favorites.delete_one({"_id": existing["_id"]})
+        return {"favorited": False}
+    await db.favorites.insert_one({"user_id": str(user["_id"]), "provider_id": provider_id, "created_at": datetime.now(timezone.utc).isoformat()})
+    return {"favorited": True}
+
+@api.get("/favorites")
+async def list_favorites(user=Depends(current_user)):
+    favs = await db.favorites.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100)
+    result = []
+    for f in favs:
+        provider = await db.users.find_one({"_id": oid(f["provider_id"])}, {"password_hash": 0})
+        if not provider: continue
+        catalog = await db.catalog.find_one({"provider_id": f["provider_id"]}, {"_id": 0})
+        result.append({"id": str(f["_id"]), "provider_id": f["provider_id"], "name": provider["name"], "category": catalog.get("category", "Serviços gerais") if catalog else "Serviços gerais", "initials": initials(provider["name"]), "created_at": f["created_at"]})
+    return result
+
+@api.get("/favorites/ids")
+async def favorite_ids(user=Depends(current_user)):
+    favs = await db.favorites.find({"user_id": str(user["_id"])}, {"provider_id": 1, "_id": 0}).to_list(200)
+    return [f["provider_id"] for f in favs]
+
+# === NOTIFICAÇÕES ===
+@api.get("/notifications")
+async def list_notifications(user=Depends(current_user)):
+    items = await db.notifications.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(30)
+    for item in items: item["id"] = str(item.pop("_id"))
+    unread = await db.notifications.count_documents({"user_id": str(user["_id"]), "read": False})
+    return {"notifications": items, "unread": unread}
+
+@api.post("/notifications/{notif_id}/read")
+async def mark_notification_read(notif_id: str, user=Depends(current_user)):
+    await db.notifications.update_one({"_id": oid(notif_id), "user_id": str(user["_id"])}, {"$set": {"read": True}})
+    return {"ok": True}
+
+@api.post("/notifications/read-all")
+async def mark_all_notifications_read(user=Depends(current_user)):
+    await db.notifications.update_many({"user_id": str(user["_id"]), "read": False}, {"$set": {"read": True}})
+    return {"ok": True}
+
+# === EDITAR PERFIL ===
+@api.put("/users/me")
+async def update_profile(data: UpdateProfileInput, user=Depends(current_user)):
+    updates = {}
+    if data.name and data.name.strip(): updates["name"] = data.name.strip()
+    if data.email:
+        email = data.email.lower()
+        existing = await db.users.find_one({"email": email, "_id": {"$ne": user["_id"]}})
+        if existing: raise HTTPException(409, "Este e-mail já está em uso")
+        updates["email"] = email
+    if data.avatar_data: updates["avatar_data"] = data.avatar_data
+    if not updates: raise HTTPException(400, "Nada para atualizar")
+    await db.users.update_one({"_id": user["_id"]}, {"$set": updates})
+    updated = await db.users.find_one({"_id": user["_id"]})
+    return public_user(updated)
+
+# === AGENDAMENTOS ===
+@api.post("/appointments")
+async def create_appointment(data: AppointmentInput, user=Depends(current_user)):
+    provider = await db.users.find_one(provider_lookup(data.provider_id), {"password_hash": 0})
+    if not provider: raise HTTPException(404, "Prestador não encontrado")
+    if str(provider["_id"]) == str(user["_id"]): raise HTTPException(400, "Você não pode agendar com você mesmo")
+    item = data.model_dump()
+    item.update({"client_id": str(user["_id"]), "client_name": user["name"], "provider_name": provider["name"], "status": "pending", "created_at": datetime.now(timezone.utc).isoformat()})
+    result = await db.appointments.insert_one(item)
+    item["id"] = str(result.inserted_id); item.pop("_id", None)
+    await create_notification(data.provider_id, "appointment", "Novo agendamento", f"{user['name']} agendou: {data.service} para {data.date} às {data.time}")
+    return item
+
+@api.get("/appointments")
+async def list_appointments(user=Depends(current_user)):
+    if has_role(user, "provider"):
+        query = {"$or": [{"provider_id": str(user["_id"])}, {"client_id": str(user["_id"])}]}
+    else:
+        query = {"client_id": str(user["_id"])}
+    items = await db.appointments.find(query).sort("created_at", -1).to_list(50)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.post("/appointments/{apt_id}/status")
+async def update_appointment_status(apt_id: str, data: AppointmentStatusInput, user=Depends(current_user)):
+    if data.status not in ["confirmed", "completed", "cancelled"]: raise HTTPException(400, "Status inválido")
+    apt = await db.appointments.find_one({"_id": oid(apt_id)})
+    if not apt: raise HTTPException(404, "Agendamento não encontrado")
+    is_provider = apt.get("provider_id") == str(user["_id"])
+    is_client = apt.get("client_id") == str(user["_id"])
+    if not is_provider and not is_client: raise HTTPException(403, "Você não participa deste agendamento")
+    if data.status == "confirmed" and not is_provider: raise HTTPException(403, "Apenas o prestador confirma")
+    await db.appointments.update_one({"_id": apt["_id"]}, {"$set": {"status": data.status, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    notify_id = apt["client_id"] if is_provider else apt["provider_id"]
+    status_text = {"confirmed": "confirmado", "completed": "concluído", "cancelled": "cancelado"}.get(data.status, data.status)
+    await create_notification(notify_id, "appointment", "Agendamento atualizado", f"Agendamento de {apt.get('service')} foi {status_text}")
+    return {"ok": True}
+
+# === ADMIN ===
+async def admin_user(user=Depends(current_user)):
+    if not has_role(user, "admin"): raise HTTPException(403, "Acesso restrito a administradores")
+    return user
+
+@api.post("/users/enable-admin")
+async def enable_admin(user=Depends(current_user)):
+    roles = sorted(set(role_list(user) + ["admin"]))
+    await db.users.update_one({"_id": user["_id"]}, {"$set": {"roles": roles}})
+    updated = await db.users.find_one({"_id": user["_id"]})
+    return public_user(updated)
+
+@api.get("/admin/stats")
+async def admin_stats(user=Depends(admin_user)):
+    return {
+        "users": await db.users.count_documents({}),
+        "providers": await db.users.count_documents({"$or": [{"role": "provider"}, {"roles": "provider"}]}),
+        "requests": await db.requests.count_documents({}),
+        "offers": await db.offers.count_documents({}),
+        "completed": await db.offers.count_documents({"status": "completed"}),
+        "reviews": await db.reviews.count_documents({}),
+        "appointments": await db.appointments.count_documents({}),
+    }
+
+@api.get("/admin/users")
+async def admin_users(user=Depends(admin_user)):
+    users = await db.users.find({}, {"password_hash": 0}).sort("created_at", -1).to_list(100)
+    result = []
+    for u in users:
+        item = public_user(u)
+        item["created_at"] = u.get("created_at")
+        item["banned"] = u.get("banned", False)
+        result.append(item)
+    return result
+
+@api.patch("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, data: AdminUserUpdate, user=Depends(admin_user)):
+    updates = {}
+    if data.banned is not None: updates["banned"] = data.banned
+    if data.roles is not None: updates["roles"] = data.roles
+    if not updates: raise HTTPException(400, "Nada para atualizar")
+    await db.users.update_one({"_id": oid(user_id)}, {"$set": updates})
+    return {"ok": True}
+
+@api.get("/admin/requests")
+async def admin_requests(user=Depends(admin_user)):
+    items = await db.requests.find({}).sort("created_at", -1).to_list(100)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.delete("/admin/requests/{req_id}")
+async def admin_delete_request(req_id: str, user=Depends(admin_user)):
+    await db.requests.delete_one({"_id": oid(req_id)})
+    return {"ok": True}
+
+@api.get("/admin/reviews")
+async def admin_reviews(user=Depends(admin_user)):
+    items = await db.reviews.find({}).sort("created_at", -1).to_list(100)
+    for item in items: item["id"] = str(item.pop("_id"))
+    return items
+
+@api.delete("/admin/reviews/{review_id}")
+async def admin_delete_review(review_id: str, user=Depends(admin_user)):
+    await db.reviews.delete_one({"_id": oid(review_id)})
+    return {"ok": True}
 
 app.include_router(api)
 origins = [os.environ.get("FRONTEND_URL", "http://localhost:3000"), "http://localhost:3000"]
